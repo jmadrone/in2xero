@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "in2xero"
+version = "3.7.0"
+description = "Invoice Ninja to Xero backfill and incremental sync for Emerald Security LLC"
+requires-python = ">=3.9"
+dependencies = ["requests>=2.28", "PyYAML>=6.0"]
+
+[project.scripts]
+in2xero = "in2xero.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["in2xero*"]

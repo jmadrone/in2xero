@@ -1,0 +1,81 @@
+# in2xero config. Copy to config.yaml and fill in.
+# ${ENV_VAR} is expanded, so secrets can stay out of this file.
+
+ninja:
+  base_url: https://invoices.yourhost.com    # no trailing slash, no /api/v1
+  api_token: ${IN_API_TOKEN}
+  verify_tls: true                           # false only for a self-signed cert
+  page_size: 200
+
+xero:
+  # custom_connection: client_credentials, US$5/month, one org. No refresh token,
+  #   no 60-day cliff. Correct for anything unattended.
+  # auth_code: standard flow. The refresh token rotates on every use; a crash
+  #   between receiving and persisting one bricks the connection.
+  auth_mode: custom_connection
+  client_id: ${XERO_CLIENT_ID}
+  client_secret: ${XERO_CLIENT_SECRET}
+  tenant_id: d2786ed8-7676-4056-9890-f2b0f62d1132   # Emerald Security
+
+  # Leave blank. The default set is what a Custom Connection needs:
+  #   accounting.invoices  accounting.payments
+  #   accounting.contacts  accounting.settings.read
+  #
+  # Custom Connections use GRANULAR scopes - accounting.transactions does not
+  # exist in their scope list, even though it is what standard OAuth apps use.
+  # Run `in2xero auth --probe-scopes` if Xero returns invalid_scope.
+  scopes: ""
+
+  # ---------------------------------------------------------------------
+  # Accounts. Codes come from Accounting -> Advanced -> Chart of accounts.
+  # ---------------------------------------------------------------------
+
+  # Where invoice lines land.
+  sales_account_code: "4300"        # Service
+
+  # Sub-cent rounding differences land here instead of quietly in revenue.
+  rounding_account_code: "7050"     # Miscellaneous
+
+  # The clearing account is set by GUID, not code.
+  #
+  # Xero does not give bank-type accounts a Code - the UI has no field for one -
+  # so there is nothing to copy out of the chart of accounts. Run:
+  #     in2xero accounts
+  # and paste the GUID it prints for "Stripe Clearing".
+  #
+  # It MUST be a BANK account and MUST NOT be the real fed bank account. The bank
+  # feed already carries the Stripe and Venmo deposits for this money; settling
+  # imported payments into the same account counts the cash twice. Once the
+  # backfill is done, re-code the existing 2025 bank lines from 4300 Service to
+  # this clearing account - they stay reconciled, only their coding changes - and
+  # what is left sitting in clearing is Stripe's processing fees. Journal that to
+  # 6050 Merchant Account Fees.
+  clearing_account_id: ""
+
+  # Only if a bank account somehow does have a Code. Ignored when
+  # clearing_account_id is set.
+  clearing_account_code: ""
+
+  batch_size: 50          # documents per API call
+  daily_call_floor: 50    # stop cleanly when the daily quota gets this low
+                          # (Starter = 1,000/day, Core = 5,000/day)
+
+sync:
+  start_date: "2025-01-01"
+  end_date: ""            # blank = today
+
+  # Expenses are deliberately not available as a step:
+  #   - Xero's bank feed already books more expense than Invoice Ninja holds
+  #   - every Invoice Ninja expense has a blank payment_date, so they would all
+  #     become bills and invent accounts payable that does not exist
+  #   - several categories are not P&L expenses at all (Owners Draw, loan
+  #     principal, Payroll Withholdings)
+  steps: [contacts, invoices, payments]
+
+  # This org carries $41.48 of tax across the entire 19-month window, on 5
+  # inclusive-tax invoices. `none` is correct. Switch to `resolve` only if that
+  # changes, and create matching rate names in Xero first.
+  tax_mode: none
+
+  crosswalk_path: in2xero.sqlite
+  dry_run: false

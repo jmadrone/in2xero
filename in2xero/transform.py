@@ -211,22 +211,37 @@ SETTLED = ("PAID",)
 GONE = ("DELETED", "VOIDED")
 
 
+# How much a match is worth when two Xero invoices share a number. Higher wins.
+_STATUS_RANK = {"PAID": 4, "AUTHORISED": 4, "SUBMITTED": 2, "DRAFT": 2,
+                "VOIDED": 0, "DELETED": 0}
+
+
 def index_existing(xero_invoices: list) -> tuple:
     """(numbers, refs) -> {id, status}, for matching what is already in Xero.
 
-    The InvoiceID matters as much as the match itself: an invoice this tool did
-    not post in THIS run still needs its Xero id recorded, or payments have
-    nothing to allocate against.
+    Xero KEEPS deleted invoices, and a deleted draft can carry the same invoice
+    number as the live one that replaced it. Last-write-wins therefore lets a
+    dead record shadow a live one: the number resolves to a DELETED invoice, the
+    live invoice is never adopted, and every payment against it is refused with
+    "not in Xero yet" while it sits there plainly visible in Xero.
+
+    So rank by status and never let a deleted or voided record displace a live
+    match. A number seen twice with equal rank keeps the first.
     """
     numbers, refs = {}, {}
+
+    def offer(bucket, key, info):
+        if not key:
+            return
+        cur = bucket.get(key)
+        if cur is None or _STATUS_RANK.get(info["status"], 1) > _STATUS_RANK.get(
+                cur["status"], 1):
+            bucket[key] = info
+
     for i in xero_invoices:
         info = {"id": i.get("InvoiceID"), "status": i.get("Status") or "?"}
-        num = str(i.get("InvoiceNumber") or "").strip()
-        ref = str(i.get("Reference") or "").strip()
-        if num:
-            numbers[num.lower()] = info
-        if ref:
-            refs[ref.lower()] = info
+        offer(numbers, str(i.get("InvoiceNumber") or "").strip().lower(), info)
+        offer(refs, str(i.get("Reference") or "").strip().lower(), info)
     return numbers, refs
 
 
@@ -254,6 +269,35 @@ def already_in_xero(ninja_inv: dict, numbers: dict, refs: dict):
         "matched_on": matched,
         "reason": f"already in Xero by {matched} (status {hit.get('status')})",
     }
+
+
+def apply_against_remaining(built: list, remaining: dict) -> tuple:
+    """Split built allocations into (accepted, over-allocated), decrementing.
+
+    Xero rejects a payment that exceeds an invoice's outstanding balance, and one
+    rejection voids its entire batch. The balance changes as a run applies
+    payments, so a snapshot taken before the run goes stale immediately - two
+    payments against one invoice both look affordable and the second is refused.
+
+    `remaining` maps Xero InvoiceID -> Decimal still owed, and is mutated here.
+    Everything is Decimal: mixing float and Decimal raises TypeError, which is
+    how this blew up mid-run the first time.
+    """
+    keep, over = [], []
+    for b in built:
+        xid = (b.get("Invoice") or {}).get("InvoiceID")
+        amt = dec(b.get("Amount"))
+        rem = remaining.get(xid)
+        if rem is None:
+            keep.append(b)
+            continue
+        rem = dec(rem)
+        if amt > rem + TOLERANCE / 2:
+            over.append({"allocation": b, "outstanding": rem, "amount": amt})
+        else:
+            remaining[xid] = rem - amt
+            keep.append(b)
+    return keep, over
 
 
 # ---- payments ----------------------------------------------------------

@@ -10,6 +10,7 @@ from .crosswalk import Crosswalk
 from .ninja import Ninja, NinjaError, dec, Z
 from .transform import (
     GONE,
+    apply_against_remaining,
     PAYABLE,
     Refused,
     SETTLED,
@@ -42,10 +43,16 @@ def adopt_invoices(cw, x, invoices, start, end, quiet=False):
     "ordering problem". Adoption belongs to whoever needs the ids, not to one step.
     """
     have = cw.known("invoice")
+    live = x.invoices_in_window(start, end)
+    numbers, refs = index_existing(live)
+
+    # What each invoice still owes, according to Xero. This is the only
+    # trustworthy answer to "does this payment still need to be applied?" - the
+    # crosswalk records intent, Xero records fact, and they diverge whenever a
+    # post fails.
+    due_by_xero_id = {i.get("InvoiceID"): dec(i.get("AmountDue")) for i in live}
+
     need = [i for i in invoices if str(i.get("id")) not in have]
-    if not need:
-        return have, {}, {}
-    numbers, refs = index_existing(x.invoices_in_window(start, end))
     pairs, blocked = [], {}
     for inv in need:
         hit = already_in_xero(inv, numbers, refs)
@@ -62,7 +69,9 @@ def adopt_invoices(cw, x, invoices, start, end, quiet=False):
     if blocked and not quiet:
         _say(f"  {len(blocked)} invoice(s) in Xero cannot take a payment "
              f"(status {', '.join(sorted(set(blocked.values())))})")
-    return cw.known("invoice"), numbers, refs
+    ids = cw.known("invoice")
+    by_ninja = {nid: due_by_xero_id.get(xid, Z) for nid, xid in ids.items()}
+    return ids, by_ninja, dict(due_by_xero_id)
 
 
 # ---- preflight ---------------------------------------------------------
@@ -391,6 +400,8 @@ def cmd_clearing(cfg, args):
     dupes = {k: g for k, g in seen.items() if len(g) > 1}
     if dupes:
         extra = sum(sum(float(z.get("Amount") or 0) for z in g[1:]) for g in dupes.values())
+        _say("\n   To clean up: open each invoice in Xero, remove the surplus payment")
+        _say("   (keep ONE of each pair), then re-run this audit.")
         _say(f"\n!! {len(dupes)} payment(s) applied TWICE TO THE SAME INVOICE"
              f" - {extra:,.2f} double-counted")
         _say("   Delete the surplus PaymentIDs in Xero before re-coding anything.")
@@ -668,8 +679,10 @@ def cmd_backfill(cfg, args):
                                        on_rejected=_inv_rejected, on_created=_inv_created)
 
         invoice_ids = cw.known("invoice")
+        outstanding, due_by_xero_id = {}, {}
         if "payments" in steps and not dry:
-            invoice_ids, _n, _r = adopt_invoices(cw, x, invoices, start, end)
+            invoice_ids, outstanding, due_by_xero_id = adopt_invoices(
+                cw, x, invoices, start, end)
         # Invoices settled in a previous run must not be paid again.
         paid_already = cw.notes_matching("invoice", "already PAID")
 
@@ -677,12 +690,52 @@ def cmd_backfill(cfg, args):
         if "payments" in steps:
             cw.mark_run_start("payments", run_start)
             payload, done = [], []
+            skipped_known, skipped_settled, skipped_present = 0, 0, 0
+            remaining = dict(due_by_xero_id)
+
+            # Which (payment, invoice) pairs does Xero ALREADY hold? Invoices have
+            # had a duplicate guard since v2.2; payments never did, and that is how
+            # the same payment got applied twice - a run posted it, died before
+            # recording it, and the next run had no way to know. The invoice still
+            # showed a balance because it was only part-paid, so the balance check
+            # could not catch it either. Only Xero's own payment list can.
+            present, paid_on = set(), {}
+            if not dry:
+                for q in x.payments_in_window("2020-01-01", date.today().isoformat()):
+                    if (q.get("Status") or "AUTHORISED") == "DELETED":
+                        continue
+                    iid = (q.get("Invoice") or {}).get("InvoiceID")
+                    paid_on.setdefault(iid, []).append(q)
+                    r = str(q.get("Reference") or "")
+                    if r.startswith("IN-P-"):
+                        present.add((r, iid))
+            if present:
+                _say(f"  {len(present)} payment allocation(s) already in Xero")
             for p in n.payments(start, end):
                 nid = str(p.get("id"))
-                if cw.get("payment", nid):
+                allocs = p.get("paymentables") or []
+
+                # Xero first. If every invoice this payment targets already shows a
+                # zero balance, the money is in - regardless of what the crosswalk
+                # thinks. This is what makes a re-run safe: Xero, not local state,
+                # decides whether there is anything left to settle.
+                if not dry and allocs and all(
+                    str(a.get("invoice_id")) in outstanding
+                    and outstanding[str(a.get("invoice_id"))] <= dec("0.005")
+                    for a in allocs
+                ):
+                    skipped_settled += 1
+                    cw.put("payment", nid, "settled", note="already settled in Xero")
                     continue
-                if any(str(a.get("invoice_id")) in paid_already
-                       for a in (p.get("paymentables") or [])):
+
+                if cw.get("payment", nid):
+                    # Recorded as done locally, but Xero still shows a balance.
+                    # Pre-3.6 runs marked rejected payments as posted, so this is
+                    # not trustworthy on its own - say so instead of skipping mutely.
+                    skipped_known += 1
+                    continue
+
+                if any(str(a.get("invoice_id")) in paid_already for a in allocs):
                     cw.refuse("payment", nid,
                               "its invoice was already PAID in Xero before this run")
                     continue
@@ -694,7 +747,61 @@ def cmd_backfill(cfg, args):
                         },
                         cfgmod.clearing_ref(cfg) or {"AccountID": "DRY-RUN-CLEARING"},
                     )
-                    payload.extend(built)
+                    # Xero's AmountDue was read ONCE, before this run posted
+                    # anything. Two payments against the same invoice both looked
+                    # affordable against that stale snapshot, and the second was
+                    # rejected for exceeding the balance - taking its whole batch
+                    # down with it. Decrement as we go.
+                    # Drop anything Xero already holds for this exact
+                    # (payment, invoice) pair before touching the balance maths.
+                    fresh = [b for b in built
+                             if (b.get("Reference"),
+                                 (b.get("Invoice") or {}).get("InvoiceID")) not in present]
+                    if not fresh:
+                        skipped_present += 1
+                        cw.put("payment", nid, "present",
+                               note="already applied in Xero")
+                        continue
+                    keep, over = apply_against_remaining(fresh, remaining)
+                    if over:
+                        o = over[0]
+                        excess = o["amount"] - o["outstanding"]
+                        iid = (o["allocation"].get("Invoice") or {}).get("InvoiceID")
+                        prior = paid_on.get(iid) or []
+                        # Name the actual situation. A cent of overpayment and an
+                        # invoice that is already settled are different problems
+                        # and want different answers from a human.
+                        if prior and o["outstanding"] <= dec("1.00"):
+                            why = (f"Xero already shows "
+                                   f"{sum(dec(z.get('Amount')) for z in prior)} paid on "
+                                   f"this invoice across {len(prior)} payment(s) "
+                                   f"({', '.join(str(z.get('Reference') or '?') for z in prior[:3])})"
+                                   " - this allocation looks like a duplicate of one of them")
+                        elif excess <= dec(str(args.cap_overpayment or "0")):
+                            why = None      # handled below by capping
+                        elif excess <= dec("1.00"):
+                            why = (f"overpaid by {excess} - the customer paid slightly more "
+                                   "than the invoice. Re-run with --cap-overpayment 1.00 to "
+                                   "allocate what fits and leave the rest")
+                        else:
+                            why = (f"exceeds the outstanding balance by {excess}. Invoice "
+                                   "Ninja and Xero genuinely disagree here - look at this "
+                                   "invoice by hand")
+                        if why is not None:
+                            cw.refuse("payment", nid,
+                                      f"allocation {o['amount']} vs {o['outstanding']} "
+                                      f"outstanding: {why}")
+                            _say(f"  REFUSED payment {nid}: {o['amount']} > "
+                                 f"{o['outstanding']} outstanding ({excess} over)")
+                            continue
+                        # Cap: allocate exactly what is left, never more.
+                        capped = dict(o["allocation"])
+                        capped["Amount"] = str(o["outstanding"])
+                        remaining[iid] = dec(0)
+                        keep.append(capped)
+                        _say(f"  CAPPED payment {nid}: {o['amount']} -> "
+                             f"{o['outstanding']} (overpaid by {excess})")
+                    payload.extend(keep)
                     done.append(nid)
                 except Refused as e:
                     reason = str(e)
@@ -705,6 +812,17 @@ def cmd_backfill(cfg, args):
                         reason = f"{reason}\n      -> {n.diagnose_invoice(miss, start, end)}"
                     cw.refuse("payment", nid, reason)
                     _say(f"  REFUSED payment {nid}: {reason}")
+            if skipped_present:
+                _say(f"  {skipped_present} payment(s) skipped - already applied in Xero")
+            if skipped_settled:
+                _say(f"  {skipped_settled} payment(s) skipped - their invoices already "
+                     "show a zero balance in Xero")
+            if skipped_known:
+                _say(f"  {skipped_known} payment(s) SKIPPED by the crosswalk while their "
+                     "invoice still owes money.")
+                _say("  These were probably marked posted by a pre-3.6 run that Xero then "
+                     "rejected.")
+                _say("  Clear them and retry:  in2xero forget payments")
             _say(f"payments: {len(payload)} allocations from {len(done)} payments")
             if payload:
                 rejected_ids = set()
@@ -718,26 +836,41 @@ def cmd_backfill(cfg, args):
                 # NO auto-retry here. Xero's Payments endpoint may apply some
                 # allocations before failing the batch; re-sending would settle
                 # the same cash twice. Report and stop instead.
+                def _pay_created(objs, _cw=cw, _dry=dry):
+                    # Record each batch AS IT LANDS. Recording only after every
+                    # batch means a failure on the last one loses all record of the
+                    # earlier ones - and an unrecorded payment gets posted again on
+                    # the next run. That is exactly how cash got applied twice.
+                    if _dry:
+                        return
+                    pairs = []
+                    for c in objs:
+                        r = str(c.get("Reference") or "")
+                        if r.startswith("IN-P-"):
+                            pairs.append((r[5:], c.get("PaymentID") or "posted"))
+                    if pairs:
+                        _cw.put_many("payment", pairs)
+
                 x.post_batch("Payments", "Payments", payload, "payment",
-                             on_rejected=_pay_rejected, retry_on_validation=False)
+                             on_rejected=_pay_rejected, retry_on_validation=False,
+                             on_created=_pay_created)
                 if not dry:
-                    # Only mark what Xero actually accepted. Marking a rejected
-                    # payment as posted retires it permanently: the crosswalk skips
-                    # it on every later run, so the invoice sits in AR forever with
-                    # no way to notice why.
                     ok = [d for d in done if str(d) not in rejected_ids]
                     if len(ok) != len(done):
                         _say(f"  {len(done) - len(ok)} payment(s) rejected - left open "
                              "for a later run, not marked posted")
-                    cw.put_many("payment", [(d, "posted") for d in ok])
+                    cw.put_many("payment", [(d, "posted") for d in ok
+                                            if not cw.get("payment", d)])
 
     except RateLimitExhausted as e:
         _say(f"\nSTOPPED CLEANLY: {e}")
         cw.close()
         return 2
     except ValidationRejected as e:
-        _say("\nXERO REJECTED THE BATCH - nothing in it was saved.")
-        _say("Xero validates a batch all-or-nothing: one bad element voids the other 49.\n")
+        _say("\nXERO REJECTED ONE BATCH - that batch was not saved.")
+        _say("Batches are all-or-nothing individually, but EARLIER BATCHES IN THIS RUN")
+        _say("WERE SAVED. Run `in2xero audit` to see the real state before assuming")
+        _say("nothing happened.\n")
         by_msg = {}
         for ref, msgs in e.rejected.items():
             by_msg.setdefault(" ; ".join(msgs), []).append(ref)
@@ -822,6 +955,29 @@ def cmd_unpaid(cfg, args):
     return 0
 
 
+def cmd_forget(cfg, args):
+    """Drop local crosswalk state for one kind so it is re-derived from Xero.
+
+    Touches nothing in Xero. Invoice ids are re-adopted automatically on the next
+    run; payments are re-attempted and Xero rejects any that are already settled,
+    so this cannot double-apply cash.
+    """
+    kind = args.kind
+    if kind not in ("payment", "payments", "invoice", "invoices", "contact", "contacts"):
+        _say(f"unknown kind {kind!r} - use payments, invoices or contacts")
+        return 1
+    kind = kind.rstrip("s")
+    cw = Crosswalk(cfg.sync.crosswalk_path)
+    n, m = cw.forget(kind)
+    cw.close()
+    _say(f"crosswalk: {cfg.sync.crosswalk_path}")
+    _say(f"forgot {n} {kind} mapping(s) and {m} refusal(s). Nothing in Xero changed.")
+    if kind == "payment":
+        _say("Next run re-checks every payment against Xero's outstanding balances;")
+        _say("anything already settled is skipped, so no cash can be applied twice.")
+    return 0
+
+
 def cmd_report(cfg, args):
     cw = Crosswalk(cfg.sync.crosswalk_path)
     counts = cw.counts()
@@ -857,6 +1013,7 @@ def main(argv=None):
         ("backfill", cmd_backfill, "post the historical window"),
         ("sync", cmd_sync, "incremental pass"),
         ("report", cmd_report, "what has been posted, and what was refused"),
+        ("forget", cmd_forget, "drop local crosswalk state for one kind (Xero untouched)"),
     ):
         p = sub.add_parser(name, help=helptext)
         p.set_defaults(fn=fn)
@@ -865,9 +1022,15 @@ def main(argv=None):
                            help="build and reconcile every document, post nothing")
             p.add_argument("--only", metavar="STEPS",
                            help="comma-separated subset, e.g. --only payments")
+            p.add_argument("--cap-overpayment", metavar="AMOUNT", default=None,
+                           help="when a payment exceeds the invoice balance by up to "
+                                "AMOUNT, allocate only what fits (e.g. 1.00). Off by "
+                                "default: the tool refuses rather than reshape cash.")
         if name == "accounts":
             p.add_argument("--all", action="store_true",
                            help="also list non-bank accounts with their codes")
+        if name == "forget":
+            p.add_argument("kind", help="payments | invoices | contacts")
         if name == "existing":
             p.add_argument("--list", action="store_true",
                            help="print every invoice, not just the counts")

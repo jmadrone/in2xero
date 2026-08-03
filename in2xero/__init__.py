@@ -18,4 +18,4 @@ here because they are invisible in the code otherwise:
     blank payment_date. Importing them would double-count and misstate.
 """
 
-__version__ = "3.7.0"
+__version__ = "4.2.0"

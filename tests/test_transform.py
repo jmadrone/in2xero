@@ -9,7 +9,8 @@ from decimal import Decimal
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from in2xero.transform import (            # noqa: E402
-    PAYABLE, Refused, SETTLED, already_in_xero, build_contact, build_invoice,
+    GONE, PAYABLE, Refused, SETTLED, already_in_xero, apply_against_remaining,
+    build_contact, build_invoice,
     build_payments, contact_name, index_existing, is_credit_application,
     make_tax_resolver,
 )
@@ -174,6 +175,38 @@ check("mixed signs reconcile", total_of(mixed) == Decimal("130.39"))
 check("no negative quantity survives",
       all(Decimal(l["Quantity"]) >= 0 for l in mixed["LineItems"]))
 
+print("\noutstanding-balance tracking (float/Decimal mixing crashed a live run)")
+
+def alloc(xid, amt):
+    return {"Invoice": {"InvoiceID": xid}, "Amount": amt}
+
+rem = {"X": Decimal("160.00")}
+keep, over = apply_against_remaining([alloc("X", "140.00")], rem)
+check("partial payment accepted", len(keep) == 1 and not over)
+check("balance decremented", rem["X"] == Decimal("20.00"))
+keep, over = apply_against_remaining([alloc("X", "20.00")], rem)
+check("second payment fits the remainder", len(keep) == 1 and not over)
+check("balance now zero", rem["X"] == Decimal("0.00"))
+keep, over = apply_against_remaining([alloc("X", "50.00")], rem)
+check("third payment refused, not silently trimmed", len(over) == 1 and not keep)
+check("refusal reports both numbers",
+      over[0]["amount"] == Decimal("50.00") and over[0]["outstanding"] == Decimal("0.00"))
+
+# Xero hands back floats; the tool works in Decimal. Mixing them raises
+# TypeError, which is exactly how this crashed mid-run.
+rem_f = {"Y": 100.0}
+keep, over = apply_against_remaining([alloc("Y", "40.00")], rem_f)
+check("float balances from Xero do not explode", len(keep) == 1 and not over)
+check("float coerced to Decimal", rem_f["Y"] == Decimal("60.00"))
+
+rem_multi = {"A": Decimal("100.00"), "B": Decimal("10.00")}
+keep, over = apply_against_remaining(
+    [alloc("A", "60.00"), alloc("B", "40.00")], rem_multi)
+check("split payment: good leg kept, bad leg flagged",
+      len(keep) == 1 and len(over) == 1)
+check("unknown invoice passes through untouched",
+      len(apply_against_remaining([alloc("ZZZ", "5.00")], {})[0]) == 1)
+
 print("\nduplicate guard / adoption")
 XERO = [
     {"InvoiceNumber": "R-1794", "Reference": "", "Status": "DRAFT", "InvoiceID": "G-DRAFT"},
@@ -182,6 +215,29 @@ XERO = [
 ]
 nums, refs = index_existing(XERO)
 check("indexes numbers and refs", len(nums) == 3 and len(refs) == 1)
+
+# Xero keeps deleted invoices, and a deleted draft can share a number with the
+# live invoice that replaced it. If the dead one wins, the live invoice is never
+# adopted and every payment against it is refused as "not in Xero".
+SHADOW = [
+    {"InvoiceNumber": "1612", "Reference": "", "Status": "DELETED", "InvoiceID": "DEAD"},
+    {"InvoiceNumber": "1612", "Reference": "IN-abc", "Status": "AUTHORISED",
+     "InvoiceID": "LIVE"},
+]
+n2, r2 = index_existing(SHADOW)
+check("live invoice wins over a deleted twin",
+      already_in_xero({"id": "abc", "number": "1612"}, n2, r2)["id"] == "LIVE")
+n3, r3 = index_existing(list(reversed(SHADOW)))
+check("and wins regardless of document order",
+      already_in_xero({"id": "zz", "number": "1612"}, n3, r3)["id"] == "LIVE")
+check("the live match is payable",
+      already_in_xero({"id": "zz", "number": "1612"}, n3, r3)["status"] in PAYABLE)
+n4, r4 = index_existing([
+    {"InvoiceNumber": "9", "Status": "DELETED", "InvoiceID": "D1"},
+    {"InvoiceNumber": "9", "Status": "VOIDED", "InvoiceID": "D2"},
+])
+check("all-dead still resolves (so it can be re-posted, not adopted)",
+      already_in_xero({"id": "q", "number": "9"}, n4, r4)["status"] in GONE)
 
 hit = already_in_xero({"id": "1", "number": "R-1794"}, nums, refs)
 check("draft is detected", hit is not None)

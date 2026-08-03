@@ -76,6 +76,19 @@ class Crosswalk:
         )) as cur:
             return dict(cur.fetchall())
 
+    def forget(self, kind):
+        """Drop all local state for one kind. Xero is unaffected.
+
+        Needed because local state can be WRONG - a pre-3.6 run marked rejected
+        payments as posted, and there is no way to tell from inside the crosswalk
+        which records those were. Clearing and re-deriving from Xero is the only
+        honest recovery.
+        """
+        n = self.db.execute("DELETE FROM crosswalk WHERE kind=?", (kind,)).rowcount
+        m = self.db.execute("DELETE FROM refused WHERE kind=?", (kind,)).rowcount
+        self.db.commit()
+        return n, m
+
     def notes_matching(self, kind, needle):
         """ninja_ids whose note contains needle. Used to skip already-settled work."""
         with closing(self.db.execute(

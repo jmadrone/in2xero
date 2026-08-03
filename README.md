@@ -66,6 +66,26 @@ Do this in Xero before the first real run.
 Deleting the bank lines instead gives the same P&L and a balance sheet where cash no
 longer matches the bank. Don't.
 
+## Secrets
+
+`config.yaml` never holds real secrets — `${IN_API_TOKEN}`, `${XERO_CLIENT_ID}`, and
+`${XERO_CLIENT_SECRET}` are expanded from the environment at load time (see
+`in2xero/config.py`). Rather than exporting those by hand, resolve them from 1Password at
+run time with the CLI's `op run`, using the `op://` references in `.env`
+(gitignored, contains no secrets — just pointers to vault items):
+
+```bash
+op run --env-file=.env -- in2xero preflight
+op run --env-file=.env -- in2xero backfill --dry-run
+op run --env-file=.env -- in2xero backfill
+op run --env-file=.env -- in2xero sync
+```
+
+Requires the 1Password CLI (`brew install 1password-cli`) signed in to the account that
+holds the vault, and "Integrate with 1Password CLI" enabled in the desktop app's
+Settings → Developer, so `op` unlocks via biometrics instead of a password prompt per run.
+Secrets are resolved into the child process's environment only — never written to disk.
+
 ## Run it
 
 ```bash
@@ -76,6 +96,9 @@ in2xero backfill                  # posts
 in2xero report                    # what went in, and what was refused
 in2xero sync                      # incremental; the crosswalk skips what is already there
 ```
+
+Prefix any of these with `op run --env-file=.env --` to source credentials from
+1Password (see *Secrets* above).
 
 `--dry-run` needs **no Xero credentials** — it is the right first move, before Xero is
 even configured.
@@ -105,7 +128,7 @@ A refused document is one the tool would not post. `in2xero report` lists them w
 reasons. Common ones:
 
 | Reason | What it means |
-|---|---|
+| --- | --- |
 | `does not reconcile` | Rebuilt lines disagree with Invoice Ninja's total by more than a cent. Look at the invoice by hand. |
 | `credit application, not cash` | Invoice Ninja records "apply a credit" as a *payment*. Posting it as cash would invent money that never hit a bank. |
 | `payment allocated to invoice N, which is not in Xero yet` | The tool looks up why and appends it. Usually the invoice predates the sync window — the payment collects AR from before the import, and there is nothing to settle it against. Only re-run if the diagnosis says the invoice IS in scope. |

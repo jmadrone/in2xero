@@ -1,10 +1,12 @@
 # in2xero config. Copy to config.yaml and fill in.
 # ${ENV_VAR} is expanded, so secrets can stay out of this file.
+# Run commands via `op run --env-file=.env -- ...` to source those env vars from
+# 1Password instead of exporting them by hand - see README.md #Secrets.
 
 ninja:
-  base_url: https://invoices.yourhost.com    # no trailing slash, no /api/v1
+  base_url: https://invoices.yourhost.com # no trailing slash, no /api/v1
   api_token: ${IN_API_TOKEN}
-  verify_tls: true                           # false only for a self-signed cert
+  verify_tls: true # false only for a self-signed cert
   page_size: 200
 
 xero:
@@ -15,7 +17,7 @@ xero:
   auth_mode: custom_connection
   client_id: ${XERO_CLIENT_ID}
   client_secret: ${XERO_CLIENT_SECRET}
-  tenant_id: d2786ed8-7676-4056-9890-f2b0f62d1132   # Emerald Security
+  tenant_id: d2786ed8-7676-4056-9890-f2b0f62d1132 # Emerald Security
 
   # Leave blank. The default set is what a Custom Connection needs:
   #   accounting.invoices  accounting.payments
@@ -31,10 +33,10 @@ xero:
   # ---------------------------------------------------------------------
 
   # Where invoice lines land.
-  sales_account_code: "4300"        # Service
+  sales_account_code: "4300" # Service
 
   # Sub-cent rounding differences land here instead of quietly in revenue.
-  rounding_account_code: "7050"     # Miscellaneous
+  rounding_account_code: "7050" # Miscellaneous
 
   # The clearing account is set by GUID, not code.
   #
@@ -56,13 +58,14 @@ xero:
   # clearing_account_id is set.
   clearing_account_code: ""
 
-  batch_size: 50          # documents per API call
-  daily_call_floor: 50    # stop cleanly when the daily quota gets this low
-                          # (Starter = 1,000/day, Core = 5,000/day)
+  batch_size: 50 # documents per API call
+  daily_call_floor:
+    50 # stop cleanly when the daily quota gets this low
+    # (Starter = 1,000/day, Core = 5,000/day)
 
 sync:
   start_date: "2025-01-01"
-  end_date: ""            # blank = today
+  end_date: "" # blank = today
 
   # Expenses are deliberately not available as a step:
   #   - Xero's bank feed already books more expense than Invoice Ninja holds

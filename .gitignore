@@ -3,6 +3,8 @@
 config.yaml
 *.yaml
 !config.example.yaml
+ninja_snapshot/ninja_snapshot.json
+ninja_snapshot/ninja_snapshot\ copy.json
 
 # Crosswalk DB - local run state (ninja_id <-> xero_id), rewritten on every
 # backfill/sync. Not source, changes every run, nothing to review in a diff.

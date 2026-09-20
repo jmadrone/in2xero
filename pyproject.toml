@@ -7,6 +7,7 @@ name = "in2xero"
 version = "4.2.0"
 description = "Invoice Ninja to Xero backfill and incremental sync for Emerald Security LLC"
 requires-python = ">=3.9"
+license = {text = "MIT"}
 dependencies = ["requests>=2.28", "PyYAML>=6.0"]
 
 [project.scripts]

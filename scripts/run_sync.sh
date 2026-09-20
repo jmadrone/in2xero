@@ -1,18 +1,30 @@
 #!/bin/bash
-# Daily in2xero sync, run by the com.emeraldsecurity.in2xero.sync LaunchAgent.
+# Generic wrapper for running in2xero from cron.
 #
-# Uses absolute paths throughout - launchd gives the job a near-empty
-# environment (no shell profile, no pyenv/homebrew on PATH), so nothing here
-# can depend on the interactive shell's PATH.
+# If you use systemd, prefer the units in deploy/ instead - systemd reads the
+# EnvironmentFile as root before dropping privileges, so the secrets file never
+# has to be readable by the service account. This script exists for cron users.
 #
-# Secrets come from 1Password via `op run` + .env (op:// references, no real
-# values on disk). Requires the 1Password desktop app to be running and
-# unlocked, with "Integrate with 1Password CLI" enabled - see README.md
-# #Secrets. If the app isn't reachable, `op run` fails and this exits
-# non-zero; `in2xero sync` is crosswalk-based and resumable, so a missed day
-# is caught up on the next run, not lost.
+# Uses absolute paths throughout: cron gives the job a near-empty environment,
+# so nothing here may depend on an interactive shell's PATH.
+#
+# The env file holds the real secret values and should be root-owned, mode 0600.
+# See README.md, "Secrets".
 set -euo pipefail
 
-cd "/Users/josh/Developer/in2xero"
+APP_DIR="${IN2XERO_APP_DIR:-/opt/in2xero}"
+CONFIG="${IN2XERO_CONFIG:-/etc/in2xero/config.yaml}"
+ENV_FILE="${IN2XERO_ENV_FILE:-/etc/in2xero/in2xero.env}"
 
-exec /opt/homebrew/bin/op run --env-file=.env -- /Users/josh/.pyenv/shims/in2xero sync
+if [ ! -r "$ENV_FILE" ]; then
+  echo "in2xero: cannot read $ENV_FILE" >&2
+  exit 1
+fi
+
+# Export every KEY=VALUE in the env file without echoing any value.
+set -a
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
+
+exec "$APP_DIR/venv/bin/in2xero" -c "$CONFIG" sync

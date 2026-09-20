@@ -1,0 +1,27 @@
+# Install to /etc/systemd/system/in2xero-sync.service
+# See README.md, "Scheduling".
+[Unit]
+Description=in2xero - Invoice Ninja to Xero sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=in2xero
+Group=in2xero
+WorkingDirectory=/var/lib/in2xero
+# systemd (PID 1) reads this as root BEFORE dropping to User=, so the file
+# can stay 0600 root:root and never be readable by the service account.
+EnvironmentFile=/etc/in2xero/in2xero.env
+ExecStart=/opt/in2xero/venv/bin/in2xero -c /etc/in2xero/config.yaml sync
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/in2xero
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true

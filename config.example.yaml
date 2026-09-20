@@ -17,7 +17,7 @@ xero:
   auth_mode: custom_connection
   client_id: ${XERO_CLIENT_ID}
   client_secret: ${XERO_CLIENT_SECRET}
-  tenant_id: d2786ed8-7676-4056-9890-f2b0f62d1132 # Emerald Security
+  tenant_id: ${XERO_TENANT_ID} # your Xero org id; `in2xero auth` prints it
 
   # Leave blank. The default set is what a Custom Connection needs:
   #   accounting.invoices  accounting.payments

@@ -1,0 +1,15 @@
+# Install to /etc/systemd/system/in2xero-sync.timer, then:
+#   sudo systemctl enable --now in2xero-sync.timer
+# OnCalendar uses the SERVER's timezone - check with `timedatectl`.
+[Unit]
+Description=Daily in2xero sync
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+# Catch up a run missed while the machine was off.
+Persistent=true
+RandomizedDelaySec=300
+Unit=in2xero-sync.service
+
+[Install]
+WantedBy=timers.target

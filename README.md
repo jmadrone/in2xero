@@ -103,6 +103,15 @@ python3 -m venv venv
 ./venv/bin/pip install .
 ```
 
+For a server install, the units in [`deploy/`](deploy/) expect the code and its
+virtualenv under `/opt/in2xero`:
+
+```bash
+sudo git clone https://github.com/jmadrone/in2xero.git /opt/in2xero/src
+sudo python3 -m venv /opt/in2xero/venv
+sudo /opt/in2xero/venv/bin/pip install /opt/in2xero/src
+```
+
 On Debian/Ubuntu, `python3 -m venv` can fail with *"ensurepip is not available"* — the
 stdlib `venv` module imports fine but the package is split out. Install it:
 
@@ -252,6 +261,17 @@ systemctl list-timers in2xero-sync.timer
 
 `Persistent=true` means a run missed while the machine was off is caught up on next
 boot. `OnCalendar` uses the **server's** timezone — check with `timedatectl`.
+
+The units assume the binary is at `/opt/in2xero/venv/bin/in2xero`, the config at
+`/etc/in2xero/config.yaml` and state under `/var/lib/in2xero`. If you installed
+elsewhere, adjust `ExecStart`, `WorkingDirectory` and `ReadWritePaths` to match.
+
+> **If you use `auth_code` mode**, set `xero.refresh_token_path` to an absolute path
+> inside the service's writable state directory (e.g.
+> `/var/lib/in2xero/xero_refresh_token.txt`). It defaults to a *relative* path, and the
+> unit runs with `ProtectSystem=strict`, so a rotated token written anywhere outside
+> `ReadWritePaths` will fail — and a refresh token that cannot be persisted bricks the
+> connection. This is one more reason to prefer `custom_connection` for scheduled runs.
 
 **cron.** Use `scripts/run_sync.sh`, which sources the env file:
 
